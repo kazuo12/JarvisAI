@@ -123,6 +123,32 @@ Para ver o diagnóstico cru: <http://localhost:8787/api/health>
 
 ---
 
+## Executável (Windows)
+
+Um `jarvis.exe` que não precisa de Node, npm nem terminal: dois cliques sobem o
+servidor e abrem o navegador no Jarvis. O que ele **não** carrega é o modelo de
+IA — são gigabytes, e o Ollama é um programa à parte que continua sendo
+instalado normalmente.
+
+Na primeira execução o Windows mostra *"O Windows protegeu o seu PC"*. Isso
+acontece porque o executável não tem assinatura digital paga, não porque haja
+algo errado: clique em **Mais informações** e depois em **Executar assim mesmo**.
+
+Para gerar você mesmo:
+
+```bash
+cd app && npm run build && cd ..
+node build-exe.mjs --target=win     # build/jarvis.exe
+node build-exe.mjs --target=linux   # build/jarvis
+node build-exe.mjs --target=mac     # build/jarvis-mac
+```
+
+O empacotamento usa o recurso nativo do Node (Single Executable Application):
+a aplicação é injetada dentro de uma cópia do próprio binário do Node, e os
+arquivos da interface viajam embutidos, servidos direto da memória.
+
+---
+
 ## Voz mais natural
 
 A fala é quebrada em frases, com uma pausa curta entre elas e uma leve variação

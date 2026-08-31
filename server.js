@@ -88,8 +88,16 @@ const MIME = {
 // Servimos o build do React quando ele existe; senao caimos na versao de
 // arquivo unico, que continua funcionando. A raiz do estatico nunca e a pasta
 // do projeto, entao codigo-fonte e .git ficam fora de alcance.
+// Quando empacotado como executavel, os arquivos da pagina viajam dentro do
+// proprio binario — nao ha pasta nenhuma para procurar no disco.
+let SEA = null;
+try {
+  const sea = require("node:sea");
+  if (sea.isSea()) SEA = sea;
+} catch (e) { /* rodando como script comum */ }
+
 const DIST = path.join(__dirname, "app", "dist");
-const TEM_BUILD = fs.existsSync(path.join(DIST, "index.html"));
+const TEM_BUILD = Boolean(SEA) || fs.existsSync(path.join(DIST, "index.html"));
 const STATIC_ROOT = TEM_BUILD ? DIST : __dirname;
 
 // Rodar o server.js de outra pasta serve uma pagina que nao existe.
@@ -335,6 +343,23 @@ async function routeChat(req, res) {
 }
 
 function routeStatic(req, res, pathname) {
+  const alvo = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const tipo = MIME[path.extname(alvo).toLowerCase()];
+
+  if (SEA) {
+    if (!tipo) { res.writeHead(404).end("nao encontrado"); return; }
+    let buf;
+    try {
+      buf = Buffer.from(SEA.getRawAsset(alvo));
+    } catch (e) {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("nao encontrado");
+      return;
+    }
+    res.writeHead(200, { "content-type": tipo, "content-length": buf.length, "cache-control": "no-store" });
+    res.end(buf);
+    return;
+  }
+
   const rel = pathname === "/" ? "/index.html" : pathname;
   const file = path.join(STATIC_ROOT, path.normalize(rel).replace(/^(\.\.[/\\])+/, ""));
 
@@ -418,7 +443,24 @@ server.listen(PORT, "127.0.0.1", async () => {
     console.log("  Suba um modelo local e recarregue a pagina. Sugestao:");
     console.log("    ollama serve   e depois   ollama pull llama3.2");
   }
+  // No executavel, dois cliques devem bastar: abrimos a pagina sozinhos.
+  if (SEA || process.env.JARVIS_OPEN === "1") {
+    const endereco = "http://localhost:" + PORT;
+    const [cmd, args] =
+      process.platform === "win32"  ? ["cmd", ["/c", "start", "", endereco]] :
+      process.platform === "darwin" ? ["open", [endereco]] :
+                                      ["xdg-open", [endereco]];
+    try {
+      const filho = spawn(cmd, args, { detached: true, stdio: "ignore" });
+      // O erro de spawn chega por evento, nao por excecao: sem este ouvinte
+      // uma maquina sem navegador padrao derrubaria o servidor inteiro.
+      filho.on("error", () => {});
+      filho.unref();
+    } catch (e) { /* o endereco esta impresso acima; seguimos servindo */ }
+  }
+
   const tts = await checarPiper();
   console.log("  Voz neural (Piper): " + (tts.ok ? tts.voz : "nao instalada — usando a voz do navegador"));
+  if (SEA) console.log("\n  Feche esta janela para encerrar o Jarvis.");
   console.log(linha + "\n");
 });
