@@ -1,7 +1,32 @@
 # JARVIS
 
-Assistente de voz pessoal com Second Brain, em arquivo único, rodando no navegador.
-O cérebro pode ser **local** (sem custo, sem API externa) ou a **API do Claude**.
+Assistente de voz pessoal com Second Brain: reconhecimento de voz, síntese de fala
+e um grafo neural animado que guarda o contexto da sua vida e alimenta todas as
+respostas. O cérebro roda **local** (sem custo, sem API externa) ou pela **API do
+Claude**.
+
+Interface em React + TypeScript, construída com Vite. Orbe e grafo desenhados em
+Canvas 2D, num único `requestAnimationFrame` para a aplicação inteira.
+
+---
+
+## Rodar em dois comandos
+
+```bash
+node server.js          # sobe em http://localhost:8787
+```
+
+O build já vem pronto no repositório, então isso basta. Para desenvolver:
+
+```bash
+cd app
+npm install
+npm run dev             # http://localhost:5173, com recarga instantânea
+npm run build           # gera app/dist, que o server.js passa a servir
+```
+
+Deixe o `node server.js` rodando numa janela: o `npm run dev` encaminha as
+chamadas de cérebro para ele.
 
 ---
 
@@ -98,13 +123,54 @@ Para ver o diagnóstico cru: <http://localhost:8787/api/health>
 
 ---
 
+## Voz mais natural
+
+A fala é quebrada em frases, com uma pausa curta entre elas e uma leve variação
+de ritmo e tom a cada frase — é o que tira o efeito de leitura mecânica. O
+seletor **VOZ** no topo lista as vozes em português instaladas; as marcadas como
+*Natural* ou *Neural* são de outra geração em qualidade, e o sistema já as
+prefere sozinho.
+
+### Voz neural local (opcional)
+
+Para uma voz bem acima do que o navegador oferece, instale o
+[Piper](https://github.com/rhasspy/piper), baixe um modelo em português e aponte:
+
+```bash
+JARVIS_PIPER_MODEL=/caminho/pt_BR-faber-medium.onnx node server.js
+```
+
+O servidor detecta sozinho e a página passa a usar a voz neural — o orbe então
+pulsa com a forma de onda real do áudio. Sem o Piper, nada muda: a voz do
+navegador continua respondendo.
+
+---
+
 ## Arquivos
 
-| Arquivo | O que é |
+| Caminho | O que é |
 |---|---|
-| `jarvis.html` | o assistente inteiro — HTML, CSS e JS num arquivo só |
-| `server.js` | servidor local e proxy para o cérebro; sem dependências |
-| `index.html` | redireciona a raiz para o `jarvis.html` |
+| `server.js` | servidor local, proxy do cérebro e TTS opcional; sem dependências |
+| `app/src/` | a aplicação React: componentes, hooks e domínio |
+| `app/dist/` | build pronto, versionado para o `node server.js` funcionar sem npm |
+| `jarvis.html` | a versão anterior, de arquivo único; ainda roda sozinha |
 
 O Second Brain fica no `localStorage` do navegador (`jarvis_notes`), então suas
 notas sobrevivem a recarregar e a fechar o navegador.
+
+---
+
+## Desempenho
+
+O orbe e o grafo saíram de SVG com filtros e dezenas de animações CSS para Canvas
+2D. Medido no mesmo Chromium, com a mesma tela e as mesmas 17 notas:
+
+| | quadros por segundo | quadros acima de 32 ms |
+|---|---|---|
+| SVG + CSS (v5) | 19,1 | 284 de 298 |
+| Canvas (v6) | 59,6 | 2 de 298 |
+
+O que fez diferença: um único `requestAnimationFrame` para tudo, brilho
+pré-desenhado em sprite no lugar de `feGaussianBlur` por nó, `Path2D` e
+gradientes criados uma vez por layout em vez de a cada quadro, nada de
+`backdrop-filter`, e o desenho para por completo quando a aba está escondida.

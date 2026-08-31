@@ -36,18 +36,35 @@ if (MAIOR < 18) {
 const http = require("http");
 const fs   = require("fs");
 const path = require("path");
+const { execFile, spawn } = require("child_process");
 
 const PORT = Number(process.env.PORT || 8787);
-const ROOT = __dirname;
 const FORCED_BACKEND = process.env.JARVIS_BACKEND_URL || "";
 const FORCED_MODEL   = process.env.JARVIS_MODEL || "";
 
-// Rodar o server.js de outra pasta serve uma pagina que nao existe.
-if (!fs.existsSync(path.join(__dirname, "jarvis.html"))) {
-  console.error("\n  Nao achei o jarvis.html ao lado do server.js.");
-  console.error("  Os dois arquivos precisam estar na mesma pasta.");
-  console.error("  Pasta atual do servidor: " + __dirname + "\n");
-  process.exit(1);
+// TTS neural local. Totalmente opcional: sem Piper instalado o navegador
+// continua falando com a propria voz, e nada quebra.
+const PIPER_BIN   = process.env.JARVIS_PIPER_BIN || "piper";
+const PIPER_MODEL = process.env.JARVIS_PIPER_MODEL || "";
+
+let piperPronto = null;   // null = ainda nao verificado
+
+function checarPiper() {
+  if (piperPronto !== null) return Promise.resolve(piperPronto);
+
+  if (!PIPER_MODEL || !fs.existsSync(PIPER_MODEL)) {
+    piperPronto = { ok: false, motivo: "sem modelo de voz (JARVIS_PIPER_MODEL)" };
+    return Promise.resolve(piperPronto);
+  }
+
+  return new Promise(resolve => {
+    execFile(PIPER_BIN, ["--version"], { timeout: 4000 }, err => {
+      piperPronto = err
+        ? { ok: false, motivo: "binario do piper nao encontrado" }
+        : { ok: true, voz: path.basename(PIPER_MODEL) };
+      resolve(piperPronto);
+    });
+  });
 }
 
 const CANDIDATES = [
@@ -56,16 +73,34 @@ const CANDIDATES = [
   { name: "llama.cpp", base: "http://127.0.0.1:8080"  }
 ];
 
-// O app e de arquivo unico: HTML com CSS e JS embutidos. A lista abaixo e
-// tambem a fronteira do que o servidor entrega — o proprio server.js fica de
-// fora de proposito.
 const MIME = {
   ".html": "text/html; charset=utf-8",
+  ".js":   "text/javascript; charset=utf-8",
   ".css":  "text/css; charset=utf-8",
   ".svg":  "image/svg+xml",
   ".ico":  "image/x-icon",
-  ".png":  "image/png"
+  ".png":  "image/png",
+  ".webp": "image/webp",
+  ".woff2":"font/woff2",
+  ".wav":  "audio/wav"
 };
+
+// Servimos o build do React quando ele existe; senao caimos na versao de
+// arquivo unico, que continua funcionando. A raiz do estatico nunca e a pasta
+// do projeto, entao codigo-fonte e .git ficam fora de alcance.
+const DIST = path.join(__dirname, "app", "dist");
+const TEM_BUILD = fs.existsSync(path.join(DIST, "index.html"));
+const STATIC_ROOT = TEM_BUILD ? DIST : __dirname;
+
+// Rodar o server.js de outra pasta serve uma pagina que nao existe.
+if (!TEM_BUILD && !fs.existsSync(path.join(__dirname, "jarvis.html"))) {
+  console.error("\n  Nao achei nem app/dist nem o jarvis.html ao lado do server.js.");
+  console.error("  Rode 'npm run build' dentro de app/, ou mantenha o");
+  console.error("  jarvis.html na mesma pasta do server.js.");
+  console.error("  Pasta atual do servidor: " + __dirname + "\n");
+  process.exit(1);
+}
+
 
 /* ────────── util ────────── */
 
@@ -145,18 +180,64 @@ function readBody(req, limit) {
 /* ────────── rotas ────────── */
 
 async function routeHealth(res) {
-  const b = await findBackend(true);
+  const [b, tts] = await Promise.all([findBackend(true), checarPiper()]);
+
   if (!b) {
     return sendJSON(res, 200, {
       ok: false,
       motivo: "Nenhum cerebro local respondeu. Suba o Ollama ou o LM Studio.",
-      procurados: CANDIDATES.map(c => c.name + " " + c.base)
+      procurados: CANDIDATES.map(c => c.name + " " + c.base),
+      tts
     });
   }
   sendJSON(res, 200, {
     ok: true, backend: b.name, base: b.base,
-    modelos: b.models, modelo_padrao: pickModel(b, "")
+    modelos: b.models, modelo_padrao: pickModel(b, ""),
+    tts
   });
+}
+
+/** Sintetiza a fala com o Piper e devolve um WAV. */
+async function routeTTS(req, res) {
+  const estado = await checarPiper();
+  if (!estado.ok) return sendJSON(res, 503, { erro: "sem-tts", mensagem: estado.motivo });
+
+  let texto = "";
+  try {
+    const corpo = JSON.parse(await readBody(req, 64 * 1024) || "{}");
+    texto = String(corpo.text || "").slice(0, 1200).trim();
+  } catch (e) {
+    return sendJSON(res, 400, { erro: "json-invalido" });
+  }
+  if (!texto) return sendJSON(res, 400, { erro: "sem-texto" });
+
+  const piper = spawn(PIPER_BIN, ["--model", PIPER_MODEL, "--output_file", "-"]);
+  const pedacos = [];
+  let respondido = false;
+
+  const falhar = (motivo) => {
+    if (respondido) return;
+    respondido = true;
+    sendJSON(res, 502, { erro: "piper-falhou", detalhe: String(motivo).slice(0, 200) });
+  };
+
+  piper.stdout.on("data", d => pedacos.push(d));
+  piper.on("error", falhar);
+  piper.on("close", code => {
+    if (respondido) return;
+    if (code !== 0 || !pedacos.length) return falhar("codigo " + code);
+    respondido = true;
+    const wav = Buffer.concat(pedacos);
+    res.writeHead(200, {
+      "content-type": "audio/wav",
+      "content-length": wav.length,
+      "access-control-allow-origin": "*",
+      "cache-control": "no-store"
+    });
+    res.end(wav);
+  });
+
+  piper.stdin.end(texto);
 }
 
 async function routeChat(req, res) {
@@ -255,13 +336,13 @@ async function routeChat(req, res) {
 
 function routeStatic(req, res, pathname) {
   const rel = pathname === "/" ? "/index.html" : pathname;
-  const file = path.join(ROOT, path.normalize(rel).replace(/^(\.\.[/\\])+/, ""));
+  const file = path.join(STATIC_ROOT, path.normalize(rel).replace(/^(\.\.[/\\])+/, ""));
 
-  if (!file.startsWith(ROOT)) { res.writeHead(403).end("proibido"); return; }
+  if (!file.startsWith(STATIC_ROOT)) { res.writeHead(403).end("proibido"); return; }
 
   // So os tipos que a pagina precisa, e nada que comece com ponto (.git, .env).
   const ext = path.extname(file).toLowerCase();
-  const escondido = path.relative(ROOT, file).split(/[/\\]/).some(seg => seg.startsWith("."));
+  const escondido = path.relative(STATIC_ROOT, file).split(/[/\\]/).some(seg => seg.startsWith("."));
   if (escondido || !MIME[ext]) {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("nao encontrado");
     return;
@@ -297,6 +378,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === "/api/health") return await routeHealth(res);
     if (url.pathname === "/api/chat" && req.method === "POST") return await routeChat(req, res);
+    if (url.pathname === "/api/tts" && req.method === "POST") return await routeTTS(req, res);
     if (req.method === "GET" || req.method === "HEAD") return routeStatic(req, res, url.pathname);
     sendJSON(res, 405, { erro: "metodo-nao-permitido" });
   } catch (e) {
@@ -336,5 +418,7 @@ server.listen(PORT, "127.0.0.1", async () => {
     console.log("  Suba um modelo local e recarregue a pagina. Sugestao:");
     console.log("    ollama serve   e depois   ollama pull llama3.2");
   }
+  const tts = await checarPiper();
+  console.log("  Voz neural (Piper): " + (tts.ok ? tts.voz : "nao instalada — usando a voz do navegador"));
   console.log(linha + "\n");
 });
