@@ -91,6 +91,19 @@ body:before{
   color:var(--c-soft);border-radius:8px;padding:9px 11px;font-family:var(--mono);font-size:12px;outline:none;
 }
 .keybar input:focus{border-color:var(--c);box-shadow:0 0 0 3px rgba(78,168,255,.10)}
+.keybar select{
+  background:#060b14;border:1px solid rgba(78,168,255,.34);color:var(--c-soft);
+  border-radius:8px;padding:9px 10px;font-family:var(--mono);font-size:10px;
+  letter-spacing:.12em;outline:none;cursor:pointer;
+}
+.keybar select:focus{border-color:var(--c)}
+.keyinfo{
+  flex:1;min-width:120px;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;
+  color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.keyinfo.ok{color:#34d399}
+.keyinfo.bad{color:#ff7a70}
+.hidden{display:none !important}
 .mini{
   font-family:var(--mono);font-size:10px;letter-spacing:.14em;cursor:pointer;
   background:rgba(78,168,255,.12);border:1px solid rgba(78,168,255,.34);
@@ -241,9 +254,15 @@ body:before{
 
   <div class="keybar">
     <span class="keydot" id="keyDot"></span>
-    <label>ANTHROPIC KEY</label>
+    <label>CÉREBRO</label>
+    <select id="brainMode">
+      <option value="local">LOCAL · SEM CUSTO</option>
+      <option value="claude">CLAUDE · API</option>
+    </select>
+    <span class="keyinfo" id="localInfo">procurando cérebro local...</span>
     <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
     <button class="mini" id="btnSaveKey">SALVAR</button>
+    <button class="mini" id="btnCheckLocal" title="reconectar ao cérebro local">&#8635;</button>
   </div>
 
   <div class="stage">
@@ -314,7 +333,9 @@ const CONFIG = {
   persona: "formal britanico",
   wakeWord: "ei jarvis",
   voiceGender: "masculina",
-  model: "claude-sonnet-5"
+  model: "claude-sonnet-5",   // usado só no modo CLAUDE
+  localUrl: "",               // vazio = mesma origem do server.js
+  localModel: ""              // vazio = o servidor escolhe o modelo instalado
 };
 
 const AREA = {
@@ -917,6 +938,20 @@ function handleSpeech(said){
 /* ════════════ CÉREBRO ════════════ */
 function getKey(){ return ($("apiKey").value || "").trim(); }
 
+function brainMode(){
+  const el = $("brainMode");
+  return (el && el.value === "claude") ? "claude" : "local";
+}
+
+/* Servido pelo server.js  -> mesma origem.
+   Aberto direto do arquivo -> fala com o servidor local pela porta padrão. */
+function localBase(){
+  if(CONFIG.localUrl) return CONFIG.localUrl.replace(/\/+$/, "");
+  const h = location.hostname;
+  if(h === "localhost" || h === "127.0.0.1") return "";   // servido pelo server.js
+  return "http://localhost:8787";                          // arquivo solto ou site
+}
+
 function ask(prompt){
   if(busy) return;
   busy = true;
@@ -926,9 +961,8 @@ function ask(prompt){
   setState("thinking");
   setStatus("PROCESSANDO");
 
-  const key = getKey();
-  if(!key){
-    fail("Não encontrei sua chave de acesso, " + CONFIG.address + ". Cole a chave da Anthropic no campo do topo, por favor.",
+  if(brainMode() === "claude" && !getKey()){
+    fail("Não encontrei sua chave de acesso, " + CONFIG.address + ". Cole a chave da Anthropic no campo do topo, ou volte o cérebro para local.",
          "CHAVE AUSENTE");
     return;
   }
@@ -936,35 +970,12 @@ function ask(prompt){
   history.push({ role:"user", content: prompt });
   if(history.length > 24) history = history.slice(-24);
 
-  fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST",
-    headers:{
-      "x-api-key": key,
-      "anthropic-version":"2023-06-01",
-      "anthropic-dangerous-direct-browser-access":"true",
-      "content-type":"application/json"
-    },
-    body: JSON.stringify({
-      model: CONFIG.model,
-      max_tokens: 400,
-      system: buildSystem(),
-      messages: history
-    })
-  })
-  .then(function(res){
-    if(!res.ok){
-      throw new Error("http-" + res.status);
-    }
-    return res.json();
-  })
-  .then(function(data){
-    let txt = "";
-    try{
-      if(data && data.content && data.content[0] && data.content[0].text) txt = data.content[0].text;
-    }catch(e){}
+  const chamada = (brainMode() === "claude") ? callClaude() : callLocal();
+
+  chamada.then(function(txt){
     if(!txt || !txt.trim()){
       history.pop();
-      fail("Recebi uma resposta vazia do servidor, " + CONFIG.address + ". Deseja repetir o comando?", "RESPOSTA VAZIA");
+      fail("Recebi uma resposta vazia, " + CONFIG.address + ". Deseja repetir o comando?", "RESPOSTA VAZIA");
       return;
     }
     history.push({ role:"assistant", content: txt });
@@ -980,15 +991,95 @@ function ask(prompt){
   })
   .catch(function(err){
     history.pop();
-    const msg = String(err && err.message || "");
-    if(msg.indexOf("http-") === 0){
-      fail("O servidor recusou a requisição, " + CONFIG.address + ". Verifique se a chave da Anthropic está correta e ativa.",
-           "ERRO " + msg.replace("http-",""));
-    }else{
-      fail("Não consegui me conectar à rede, " + CONFIG.address + ". Confira sua conexão e tente novamente.",
-           "FALHA DE REDE");
-    }
+    falarErro(err);
   });
+}
+
+/* ── cerebro local (server.js -> Ollama / LM Studio / llama.cpp) ── */
+function callLocal(){
+  return fetch(localBase() + "/api/chat", {
+    method:"POST",
+    headers:{ "content-type":"application/json" },
+    body: JSON.stringify({
+      system: buildSystem(),
+      messages: history,
+      max_tokens: 400,
+      model: CONFIG.localModel || ""
+    })
+  })
+  .catch(function(){ throw new Error("local-offline"); })
+  .then(function(res){
+    return res.json().catch(function(){ return {}; }).then(function(data){
+      if(!res.ok){
+        const e = new Error("local-" + res.status);
+        e.corpo = data;
+        throw e;
+      }
+      return String(data.text || "");
+    });
+  });
+}
+
+/* ── cerebro Claude (API da Anthropic) ── */
+function callClaude(){
+  return fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{
+      "x-api-key": getKey(),
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true",
+      "content-type":"application/json"
+    },
+    body: JSON.stringify({
+      model: CONFIG.model,
+      max_tokens: 400,
+      system: buildSystem(),
+      messages: history
+    })
+  })
+  .catch(function(){ throw new Error("rede"); })
+  .then(function(res){
+    if(!res.ok) throw new Error("http-" + res.status);
+    return res.json();
+  })
+  .then(function(data){
+    let txt = "";
+    try{
+      if(data && data.content && data.content[0] && data.content[0].text) txt = data.content[0].text;
+    }catch(e){}
+    return txt;
+  });
+}
+
+/* ── todo erro vira fala ── */
+function falarErro(err){
+  const msg = String(err && err.message || "");
+  const corpo = (err && err.corpo) || {};
+
+  if(msg === "local-offline"){
+    return fail("Não encontrei o servidor local, " + CONFIG.address + ". Confira se o comando node server.js está rodando no terminal.",
+                "SERVIDOR LOCAL FORA DO AR");
+  }
+  if(msg === "local-503"){
+    const porque = corpo.erro === "sem-modelo"
+      ? "O servidor está no ar, mas não há modelo instalado. Rode ollama pull llama3.2."
+      : "Nenhum modelo local está rodando. Abra o Ollama e tente de novo.";
+    return fail(porque, "SEM CÉREBRO LOCAL");
+  }
+  if(msg === "local-504"){
+    return fail("O modelo local demorou demais para responder, " + CONFIG.address + ". Tente uma pergunta mais curta ou um modelo menor.",
+                "TEMPO ESGOTADO");
+  }
+  if(msg.indexOf("local-") === 0){
+    return fail("O cérebro local recusou a requisição, " + CONFIG.address + ". Veja o terminal do servidor para o detalhe.",
+                "ERRO LOCAL " + msg.replace("local-",""));
+  }
+  if(msg.indexOf("http-") === 0){
+    return fail("O servidor recusou a requisição, " + CONFIG.address + ". Verifique se a chave da Anthropic está correta e ativa.",
+                "ERRO " + msg.replace("http-",""));
+  }
+  fail("Não consegui me conectar à rede, " + CONFIG.address + ". Confira sua conexão e tente novamente.",
+       "FALHA DE REDE");
 }
 
 function fail(spoken, status){
@@ -1019,13 +1110,57 @@ $("typed").addEventListener("keydown", function(ev){
 
 /* ════════════ CHAVE ════════════ */
 function refreshKeyDot(){
+  if(brainMode() === "local") return;   // no modo local quem manda no ponto é a sonda
   $("keyDot").className = "keydot" + (getKey() ? " ok" : "");
 }
+
+/* Pergunta ao server.js qual cérebro ele achou. */
+function checkLocal(){
+  const info = $("localInfo");
+  info.className = "keyinfo";
+  info.textContent = "procurando cérebro local...";
+
+  fetch(localBase() + "/api/health", { cache:"no-store" })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d && d.ok){
+        info.className = "keyinfo ok";
+        info.textContent = d.backend + " · " + (d.modelo_padrao || "sem modelo");
+        $("keyDot").className = "keydot ok";
+      }else{
+        info.className = "keyinfo bad";
+        info.textContent = "nenhum modelo local no ar";
+        $("keyDot").className = "keydot";
+      }
+    })
+    .catch(function(){
+      info.className = "keyinfo bad";
+      info.textContent = "servidor local fora do ar — rode node server.js";
+      $("keyDot").className = "keydot";
+    });
+}
+
+/* Mostra só o que interessa ao modo escolhido. */
+function applyBrainMode(){
+  const local = brainMode() === "local";
+  $("apiKey").classList.toggle("hidden", local);
+  $("btnSaveKey").classList.toggle("hidden", local);
+  $("localInfo").classList.toggle("hidden", !local);
+  $("btnCheckLocal").classList.toggle("hidden", !local);
+  try{ localStorage.setItem("jarvis_brain", brainMode()); }catch(e){}
+  if(local) checkLocal(); else refreshKeyDot();
+}
+
+$("brainMode").addEventListener("change", applyBrainMode);
+$("btnCheckLocal").addEventListener("click", checkLocal);
 (function initKey(){
   let k = "";
   try{ k = localStorage.getItem("anthropic_key") || ""; }catch(e){}
   $("apiKey").value = k;
-  refreshKeyDot();
+  let modo = "local";
+  try{ modo = localStorage.getItem("jarvis_brain") || "local"; }catch(e){}
+  $("brainMode").value = (modo === "claude") ? "claude" : "local";
+  applyBrainMode();
 })();
 $("btnSaveKey").addEventListener("click", function(){
   try{ localStorage.setItem("anthropic_key", getKey()); }catch(e){}
@@ -1053,6 +1188,8 @@ $("btnActivate").addEventListener("click", function(){
 
   recog = initRecog();
   wantListen = !!recog;
+
+  if(brainMode() === "local") checkLocal();
 
   busy = true;
   setState("speaking");
