@@ -23,6 +23,16 @@
 
 "use strict";
 
+// Node antigo nao tem fetch nativo e o erro que ele daria ("fetch is not
+// defined") nao ajuda ninguem. Melhor falhar aqui, dizendo o que fazer.
+const MAIOR = Number(process.versions.node.split(".")[0]);
+if (MAIOR < 18) {
+  console.error("\n  Este servidor precisa do Node 18 ou mais novo.");
+  console.error("  Voce esta no Node " + process.versions.node + ".");
+  console.error("  Baixe a versao LTS em https://nodejs.org e tente de novo.\n");
+  process.exit(1);
+}
+
 const http = require("http");
 const fs   = require("fs");
 const path = require("path");
@@ -31,6 +41,14 @@ const PORT = Number(process.env.PORT || 8787);
 const ROOT = __dirname;
 const FORCED_BACKEND = process.env.JARVIS_BACKEND_URL || "";
 const FORCED_MODEL   = process.env.JARVIS_MODEL || "";
+
+// Rodar o server.js de outra pasta serve uma pagina que nao existe.
+if (!fs.existsSync(path.join(__dirname, "jarvis.html"))) {
+  console.error("\n  Nao achei o jarvis.html ao lado do server.js.");
+  console.error("  Os dois arquivos precisam estar na mesma pasta.");
+  console.error("  Pasta atual do servidor: " + __dirname + "\n");
+  process.exit(1);
+}
 
 const CANDIDATES = [
   { name: "Ollama",    base: "http://127.0.0.1:11434" },
@@ -284,6 +302,21 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     sendJSON(res, 500, { erro: "erro-interno", detalhe: String(e && e.message || e) });
   }
+});
+
+server.on("error", (err) => {
+  if (err && err.code === "EADDRINUSE") {
+    console.error("\n  A porta " + PORT + " ja esta ocupada.");
+    console.error("  Provavelmente o servidor ja esta rodando em outra janela.");
+    console.error("  Abra http://localhost:" + PORT + " no navegador,");
+    console.error("  ou suba numa porta diferente:  PORT=8788 node server.js\n");
+  } else if (err && err.code === "EACCES") {
+    console.error("\n  Sem permissao para usar a porta " + PORT + ".");
+    console.error("  Tente uma porta acima de 1024:  PORT=8788 node server.js\n");
+  } else {
+    console.error("\n  Falha ao subir o servidor: " + (err && err.message || err) + "\n");
+  }
+  process.exit(1);
 });
 
 server.listen(PORT, "127.0.0.1", async () => {
