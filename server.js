@@ -118,23 +118,46 @@ function withTimeout(ms) {
   return { signal: ac.signal, done: () => clearTimeout(t) };
 }
 
-async function listModels(base, ms) {
+async function pedir(url, ms) {
   const t = withTimeout(ms);
   try {
-    const res = await fetch(base + "/v1/models", { signal: t.signal });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const rows = Array.isArray(data && data.data) ? data.data : [];
-    return rows.map(m => String(m.id)).filter(Boolean);
+    const res = await fetch(url, { signal: t.signal });
+    if (!res.ok) return { erro: "http " + res.status };
+    return { dados: await res.json() };
   } catch (e) {
-    return null;
+    return { erro: (e && e.name === "AbortError") ? "sem resposta a tempo" : "sem conexao" };
   } finally {
     t.done();
   }
 }
 
+/**
+ * Descobre os modelos de um servidor local.
+ *
+ * Tenta primeiro o dialeto OpenAI, que LM Studio e llama.cpp tambem falam.
+ * Se nao houver, cai no caminho nativo do Ollama: versoes anteriores a 2024
+ * nao tinham /v1/models, e sem esta segunda tentativa elas ficavam invisiveis
+ * mesmo com o Ollama rodando.
+ */
+async function listModels(base, ms) {
+  const openai = await pedir(base + "/v1/models", ms);
+  if (openai.dados) {
+    const linhas = Array.isArray(openai.dados.data) ? openai.dados.data : [];
+    return { models: linhas.map(m => String(m.id)).filter(Boolean), via: "/v1/models" };
+  }
+
+  const nativo = await pedir(base + "/api/tags", ms);
+  if (nativo.dados) {
+    const linhas = Array.isArray(nativo.dados.models) ? nativo.dados.models : [];
+    return { models: linhas.map(m => String(m.name || m.model)).filter(Boolean), via: "/api/tags" };
+  }
+
+  return { erro: openai.erro + " em /v1/models, " + nativo.erro + " em /api/tags" };
+}
+
 /** Descobre qual cerebro esta no ar. Resultado fica em cache ate falhar. */
 let cached = null;
+let ultimoDiagnostico = [];
 
 async function findBackend(force) {
   if (cached && !force) return cached;
@@ -143,13 +166,18 @@ async function findBackend(force) {
     ? [{ name: "Personalizado", base: FORCED_BACKEND.replace(/\/+$/, "") }]
     : CANDIDATES;
 
+  ultimoDiagnostico = [];
+
   for (const c of pool) {
-    const models = await listModels(c.base, 1500);
-    if (models) {
-      cached = { name: c.name, base: c.base, models };
+    const r = await listModels(c.base, 3000);
+    if (r.models) {
+      ultimoDiagnostico.push({ nome: c.name, endereco: c.base, resultado: "respondeu por " + r.via });
+      cached = { name: c.name, base: c.base, models: r.models, via: r.via };
       return cached;
     }
+    ultimoDiagnostico.push({ nome: c.name, endereco: c.base, resultado: r.erro });
   }
+
   cached = null;
   return null;
 }
@@ -194,13 +222,14 @@ async function routeHealth(res) {
     return sendJSON(res, 200, {
       ok: false,
       motivo: "Nenhum cerebro local respondeu. Suba o Ollama ou o LM Studio.",
-      procurados: CANDIDATES.map(c => c.name + " " + c.base),
+      diagnostico: ultimoDiagnostico,
       tts
     });
   }
   sendJSON(res, 200, {
     ok: true, backend: b.name, base: b.base,
     modelos: b.models, modelo_padrao: pickModel(b, ""),
+    via: b.via,
     tts
   });
 }
@@ -282,18 +311,34 @@ async function routeChat(req, res) {
     chat.push({ role: m.role, content: m.content });
   }
 
-  const t = withTimeout(Number(process.env.JARVIS_TIMEOUT_MS || 180000));
-  try {
-    const upstream = await fetch(backend.base + "/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+  // Falamos o mesmo dialeto pelo qual o servidor foi encontrado. Um Ollama
+  // antigo, sem /v1, aceita apenas o formato nativo.
+  const nativo = backend.via === "/api/tags";
+  const rota = nativo ? "/api/chat" : "/v1/chat/completions";
+  const corpo = nativo
+    ? {
+        model,
+        messages: chat,
+        stream: false,
+        options: {
+          num_predict: Number(payload.max_tokens || 400),
+          temperature: typeof payload.temperature === "number" ? payload.temperature : 0.7
+        }
+      }
+    : {
         model,
         messages: chat,
         max_tokens: Number(payload.max_tokens || 400),
         temperature: typeof payload.temperature === "number" ? payload.temperature : 0.7,
         stream: false
-      }),
+      };
+
+  const t = withTimeout(Number(process.env.JARVIS_TIMEOUT_MS || 180000));
+  try {
+    const upstream = await fetch(backend.base + rota, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(corpo),
       signal: t.signal
     });
 
@@ -309,8 +354,10 @@ async function routeChat(req, res) {
     let text = "";
     try {
       const data = JSON.parse(raw);
-      const choice = data && data.choices && data.choices[0];
-      text = (choice && choice.message && choice.message.content) || "";
+      text = nativo
+        ? (data && data.message && data.message.content) || ""
+        : (data && data.choices && data.choices[0] && data.choices[0].message
+            && data.choices[0].message.content) || "";
     } catch (e) {
       return sendJSON(res, 502, { erro: "resposta-ilegivel", detalhe: raw.slice(0, 400) });
     }
@@ -440,6 +487,9 @@ server.listen(PORT, "127.0.0.1", async () => {
     if (b.models.length > 1) console.log("  Outros modelos:     " + b.models.slice(1).join(", "));
   } else {
     console.log("  Cerebro detectado:  NENHUM");
+    for (const d of ultimoDiagnostico) {
+      console.log("    - " + d.nome.padEnd(10) + d.endereco + "  ->  " + d.resultado);
+    }
     console.log("  Suba um modelo local e recarregue a pagina. Sugestao:");
     console.log("    ollama serve   e depois   ollama pull llama3.2");
   }

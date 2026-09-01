@@ -119,7 +119,16 @@ O Jarvis **fala** todo erro em voz alta, e o status abaixo do nome mostra o cód
 | `ERRO 401` | chave da Anthropic inválida |
 
 O botão `↻` ao lado do seletor reconecta ao cérebro local sem recarregar a página.
-Para ver o diagnóstico cru: <http://localhost:8787/api/health>
+
+Quando nenhum cérebro é encontrado, <http://localhost:8787/api/health> mostra o
+que aconteceu em cada porta, uma a uma — e a mesma lista sai na janela do
+servidor. É por aí que se descobre se o problema é o programa não estar no ar,
+demorar a responder ou falar um dialeto diferente.
+
+O servidor entende os dois dialetos do Ollama: o compatível com OpenAI
+(`/v1/models`) e o nativo (`/api/tags`), usado pelas versões anteriores a 2024.
+A detecção tenta um e depois o outro, e a conversa segue pelo mesmo caminho que
+respondeu.
 
 ---
 
